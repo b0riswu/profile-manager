@@ -402,8 +402,19 @@ func TestModelContextEdit(t *testing.T) {
 		t.Fatalf("contextModelID = %q, want claude-sonnet-5", m.contextModelID)
 	}
 
-	// cycle to 1048576 (MaxInputTokens) preset
-	step(tea.KeyMsg{Type: tea.KeyRight})
+	// cycle to the 1048576 (MaxInputTokens) preset. Seek by value rather than
+	// by a fixed number of keypresses: the model's reported ceiling is merged
+	// into the standard presets, so its index depends on how it sorts against
+	// them.
+	for i := 0; i < len(m.contextPresets); i++ {
+		if m.contextPresets[m.contextPresetIdx] == 1048576 {
+			break
+		}
+		step(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	if got := m.contextPresets[m.contextPresetIdx]; got != 1048576 {
+		t.Fatalf("could not reach 1048576 preset; presets = %v", m.contextPresets)
+	}
 	step(tea.KeyMsg{Type: tea.KeyEnter})
 
 	if m.editingContext {
@@ -606,5 +617,89 @@ func TestSettingsEditEscCancels(t *testing.T) {
 	}
 	if m.profiles[0].SettingsPath != "/existing/path.json" {
 		t.Fatalf("SettingsPath changed after Esc: %q", m.profiles[0].SettingsPath)
+	}
+}
+
+// A model whose provider under-reports max_input_tokens must still offer the
+// 1M preset: the reported ceiling is merged into the standard presets, not
+// substituted for them. Regression test — previously buildModelPresets
+// returned [0, reported] and 1M was unreachable, so the runner never appended
+// the [1m] suffix for such a model.
+func TestBuildModelPresetsKeeps1M(t *testing.T) {
+	cases := []struct {
+		name     string
+		reported int
+		want     []int
+	}{
+		{"under-reported ceiling", 200000, []int{0, 200000, 1000000}},
+		{"reported equals 1M", 1000000, []int{0, 1000000}},
+		{"unreported", 0, []int{0, 1000000}},
+		{"above 1M", 2000000, []int{0, 1000000, 2000000}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildModelPresets(provider.ModelInfo{
+				ID: "claude-opus-5", MaxInputTokens: tc.reported,
+			})
+			if len(got) != len(tc.want) {
+				t.Fatalf("presets = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("presets = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// End-to-end through the event loop: selecting a model whose reported ceiling
+// is below 1M and cycling presets must reach 1M and persist it per-model.
+func TestContextEditModelReaches1M(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	cfg := &config.Config{
+		Profiles: []config.Profile{
+			{Name: "sub", Provider: config.ProviderAnthropic, Model: "claude-opus-5"},
+		},
+	}
+	m := model{
+		cfg: cfg, cfgPath: path, profiles: cfg.Profiles,
+		models: []provider.ModelInfo{
+			{ID: "claude-opus-5", DisplayName: "Claude Opus 5", MaxInputTokens: 200000},
+		},
+		width: 90, height: 20, activePane: paneModels,
+	}
+
+	step := func(msg tea.KeyMsg) {
+		next, _ := m.Update(msg)
+		m = next.(model)
+	}
+	visible := func() string { return ansiRe.ReplaceAllString(m.View(), "") }
+
+	step(keyRunes("c"))
+	if !m.editingContext || !m.contextForModel {
+		t.Fatal("expected per-model context editing after pressing c")
+	}
+
+	// Cycle to the largest preset; 1M must be reachable.
+	found := false
+	for i := 0; i < len(m.contextPresets); i++ {
+		if m.contextPresets[m.contextPresetIdx] == 1000000 {
+			found = true
+			break
+		}
+		step(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	if !found {
+		t.Fatalf("1M not reachable; presets = %v", m.contextPresets)
+	}
+	if !strings.Contains(visible(), "1M") {
+		t.Fatal("1M preset not rendered")
+	}
+
+	step(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.profiles[0].ModelContext["claude-opus-5"]; got != 1000000 {
+		t.Fatalf("ModelContext[claude-opus-5] = %d, want 1000000", got)
 	}
 }
