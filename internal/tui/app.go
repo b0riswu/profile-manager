@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -65,11 +66,23 @@ func contextPresetLabel(v int) string {
 	return config.FormatContextTokens(v)
 }
 
+// buildModelPresets merges the model's advertised limit into the standard
+// presets instead of replacing them. Providers routinely under-report
+// max_input_tokens, and a model whose reported ceiling is below the largest
+// preset must still be selectable at the larger value — the gateway, not the
+// /models payload, decides what a launch actually accepts.
 func buildModelPresets(mod provider.ModelInfo) []int {
-	if mod.MaxInputTokens > 0 && mod.MaxInputTokens != contextPresets[len(contextPresets)-1] {
-		return []int{0, mod.MaxInputTokens}
+	if mod.MaxInputTokens <= 0 {
+		return contextPresets
 	}
-	return contextPresets
+
+	merged := make([]int, len(contextPresets), len(contextPresets)+1)
+	copy(merged, contextPresets)
+	if !slices.Contains(merged, mod.MaxInputTokens) {
+		merged = append(merged, mod.MaxInputTokens)
+	}
+	slices.Sort(merged)
+	return merged
 }
 
 type modelsLoadedMsg struct {
